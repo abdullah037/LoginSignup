@@ -1,5 +1,5 @@
 const express = require('express');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs'); // Switched to bcryptjs for better Docker compatibility
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 require('dotenv').config();
@@ -13,16 +13,38 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// --- DATABASE INITIALIZATION ---
+// This ensures the 'users' table exists before the app starts handling requests
+const initDb = async () => {
+  const createTableQuery = `
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(255) NOT NULL UNIQUE,
+      email VARCHAR(255) NOT NULL UNIQUE,
+      password VARCHAR(255) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );`;
+  
+  try {
+    // Basic connectivity check + table creation
+    const [result] = await pool.query(createTableQuery);
+    console.log("✅ Database initialized: Users table is ready");
+  } catch (err) {
+    console.error("❌ Database initialization failed!");
+    console.error(err.message);
+    // In a real production app, you might want to process.exit(1) here
+  }
+};
+
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  res.json({ status: 'OK', message: 'Server is running', timestamp: new Date() });
 });
 
 // Signup endpoint
 app.post('/api/signup', async (req, res) => {
   const { username, email, password } = req.body;
 
-  // Validation
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'All fields are required' });
   }
@@ -32,7 +54,6 @@ app.post('/api/signup', async (req, res) => {
   }
 
   try {
-    // Check if user already exists
     const [existingUsers] = await pool.query(
       'SELECT * FROM users WHERE username = ? OR email = ?',
       [username, email]
@@ -42,19 +63,16 @@ app.post('/api/signup', async (req, res) => {
       return res.status(409).json({ error: 'Username or email already exists' });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert new user
     const [result] = await pool.query(
       'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
       [username, email, hashedPassword]
     );
 
-    // Generate JWT token
     const token = jwt.sign(
       { userId: result.insertId, username },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'fallback_secret_for_practice',
       { expiresIn: '24h' }
     );
 
@@ -74,13 +92,11 @@ app.post('/api/signup', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
 
-  // Validation
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
   }
 
   try {
-    // Find user
     const [users] = await pool.query(
       'SELECT * FROM users WHERE username = ? OR email = ?',
       [username, username]
@@ -91,18 +107,15 @@ app.post('/api/login', async (req, res) => {
     }
 
     const user = users[0];
-
-    // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password);
 
     if (!isValidPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Generate JWT token
     const token = jwt.sign(
       { userId: user.id, username: user.username },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'fallback_secret_for_practice',
       { expiresIn: '24h' }
     );
 
@@ -127,7 +140,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Access token required' });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_for_practice', (err, user) => {
     if (err) {
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
@@ -136,7 +149,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Protected route example
+// Protected route
 app.get('/api/profile', authenticateToken, async (req, res) => {
   try {
     const [users] = await pool.query(
@@ -157,6 +170,8 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  // We run the DB init here when the server starts
+  await initDb();
   console.log(`🚀 Server running on port ${PORT}`);
 });
